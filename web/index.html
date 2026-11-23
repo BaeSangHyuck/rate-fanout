@@ -18,6 +18,7 @@
   .stackline span { display: inline-block; font-size: 12px; background: #fff; border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; margin: 0 4px 6px 0; }
 </style></head>
 <body><div class="wrap">
+  <nav class="nav"><a href="./" class="on">대출 조건 병렬 조회</a><a href="orders.html">주문 재고 정합성</a><a href="coupon.html">선착순 쿠폰 발급</a><a class="ext" href="https://github.com/BaeSangHyuck/rate-fanout" target="_blank" rel="noopener">GitHub</a></nav>
   <span class="pill">Kotlin · Spring WebFlux · Coroutines</span>
   <h1>금융사 대출 조건 병렬 조회</h1>
   <p class="lead">사용자 한 명의 대출 조건을 금융사 12곳에 묻고, 모인 결과를 금리순으로 돌려주는 API입니다. 기관마다 응답 시간이 다르고 일부는 에러를 내거나 늦게 응답합니다. 아래 버튼을 누르면 <b>실제 서버</b>가 모의 금융사 API 12곳을 HTTP로 호출하고, 그 결과를 그대로 그립니다.</p>

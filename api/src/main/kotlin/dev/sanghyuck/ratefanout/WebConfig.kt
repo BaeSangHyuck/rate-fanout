@@ -12,6 +12,6 @@ class WebConfig(
     override fun addCorsMappings(registry: CorsRegistry) {
         registry.addMapping("/api/**")
             .allowedOrigins(*origins.split(",").map(String::trim).toTypedArray())
-            .allowedMethods("GET")
+            .allowedMethods("GET", "POST")
     }
 }

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주문 재고 정합성</title>
+<meta name="description" content="동시 주문의 재고 차감을 실제 DB 트랜잭션으로 돌려 락 유무에 따른 정합성을 비교하는 데모">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="style.css">
+<style>:root { --c: #3182f6; --c-soft: #e8f3ff; } .ob { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }</style>
+</head>
+<body><div class="wrap">
+  <nav class="nav"><a href="./">대출 조건 병렬 조회</a><a href="orders.html" class="on">주문 재고 정합성</a><a href="coupon.html">선착순 쿠폰 발급</a><a class="ext" href="https://github.com/BaeSangHyuck/rate-fanout" target="_blank" rel="noopener">GitHub</a></nav>
+  <span class="pill">Spring · JDBC 트랜잭션 · H2</span>
+  <h1>매장 동시 주문과 재고 정합성</h1>
+  <p class="lead">여러 POS에서 같은 상품 주문이 동시에 들어옵니다. 주문마다 <b>재고 차감 → 커밋 → 외부 결제 승인</b> 순서로 진행하고, 승인이 실패하면 보상 트랜잭션으로 재고를 되돌립니다. 버튼을 누르면 <b>실제 서버가 DB 트랜잭션으로</b> 주문을 동시에 처리하고, 끝난 뒤 DB 재고를 그대로 보여 줍니다.</p>
+
+  <div class="card">
+    <div class="controls">
+      <label>재고 차감 방식
+        <span class="seg" id="mode"><button data-v="NONE">락 없음 (조회 후 저장)</button><button data-v="PESSIMISTIC" class="on">비관적 락 (FOR UPDATE)</button></span></label>
+      <label>동시 주문 수<input type="number" id="orders" value="20" min="1" max="60"></label>
+      <label>초기 재고<input type="number" id="stock" value="10" min="1" max="60"></label>
+      <label>결제 승인 실패율
+        <select id="pay"><option value="0">0%</option><option value="20" selected>20%</option><option value="40">40%</option></select></label>
+      <label>이벤트 발행 실패율
+        <select id="pub"><option value="0">0%</option><option value="25" selected>25%</option><option value="50">50%</option></select></label>
+      <label>시드<input type="number" id="seed" value="1" min="1" max="1000000"></label>
+      <button class="btn" id="run">주문 실행</button>
+    </div>
+    <div class="grid g2">
+      <div>
+        <h3>주문별 결과 <span class="muted">· 서버 처리 시간</span></h3>
+        <div class="lanes" id="lanes"><p class="muted">실행하면 서버 응답으로 채워집니다.</p></div>
+      </div>
+      <div>
+        <h3>재고 정합성</h3>
+        <div class="metrics">
+          <div class="metric"><div class="v" id="mStock">-</div><div class="l">DB 재고</div></div>
+          <div class="metric"><div class="v" id="mExpect">-</div><div class="l">기대 재고 (초기 − 결제 완료)</div></div>
+          <div class="metric"><div class="v" id="mPaid">-</div><div class="l">결제 완료</div></div>
+          <div class="metric"><div class="v" id="mComp">-</div><div class="l">결제 실패 → 보상 / 품절</div></div>
+        </div>
+        <div class="verdict idle" id="verdict">실행하면 DB 재고와 기대 재고를 비교합니다.</div>
+      </div>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card">
+      <h3>아웃박스 이벤트 <span class="muted">· 재고 변경과 같은 트랜잭션에 기록</span></h3>
+      <div class="ob">
+        <div class="metric"><div class="v" id="oEvents">-</div><div class="l">기록된 이벤트</div></div>
+        <div class="metric"><div class="v" id="oConsumed">-</div><div class="l">컨슈머 처리 (1회씩)</div></div>
+        <div class="metric"><div class="v" id="oDup">-</div><div class="l">중복 전달 무시 (eventId)</div></div>
+      </div>
+      <p class="muted" id="oNote" style="margin-top:10px"></p>
+      <h3 style="margin-top:16px">실행 기록</h3>
+      <table><thead><tr><th>방식</th><th>판매</th><th>DB 재고</th><th>기대 재고</th><th>결과</th></tr></thead><tbody id="hist"><tr><td colspan="5" class="muted">아직 없음</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h3>여기서 보이는 것</h3>
+      <p class="muted"><b>락 없음</b>: 두 주문이 같은 재고 값을 읽고 각자 1을 빼서 저장하면 차감 하나가 사라집니다(lost update). 판매는 됐는데 재고가 줄지 않아 초과 판매가 생깁니다.</p>
+      <p class="muted" style="margin-top:8px"><b>비관적 락</b>: <code>SELECT … FOR UPDATE</code>로 같은 상품의 차감을 줄 세웁니다. 결제 승인은 트랜잭션 밖에서 기다려 락과 커넥션을 오래 잡지 않습니다.</p>
+      <p class="muted" style="margin-top:8px"><b>보상 트랜잭션</b>: 외부 승인은 DB 트랜잭션으로 묶을 수 없어서, 실패하면 이미 커밋한 차감을 반대 연산으로 되돌립니다.</p>
+      <p class="muted" style="margin-top:8px"><b>아웃박스</b>: 발행이 실패하면 남겨 두고 다음 주기에 다시 보냅니다. 전달은 됐지만 응답을 못 받으면 같은 이벤트가 또 나가므로(at-least-once), 컨슈머가 eventId 유니크 키로 중복을 걸러냅니다.</p>
+      <p class="muted" style="margin-top:12px">마지막 요청</p>
+      <p style="margin-top:4px"><code id="reqUrl">-</code></p>
+    </div>
+  </div>
+  <p class="note">인메모리 H2 DB에서 실행합니다. 경합이 잘 보이도록 조회와 저장 사이에 30ms 처리 시간을 두었고, 결제 승인 지연(150–400ms)과 실패는 시드로 재현되는 모의 값입니다. 무료 서버라 한동안 요청이 없으면 첫 응답이 30초~1분 늦을 수 있습니다.</p>
+</div>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+let mode = 'PESSIMISTIC';
+seg('mode', v => mode = v);
+const LABEL = { PAID: ['결제 완료', 'ok'], COMPENSATED: ['승인 실패 · 보상', 'bad'], SOLD_OUT: ['품절', ''] };
+const history = [];
+$('run').onclick = async () => {
+  $('run').disabled = true;
+  $('verdict').className = 'verdict idle'; $('verdict').textContent = '서버 응답을 기다리는 중…';
+  try {
+    const d = await call('/api/orders/run', { mode, orders: $('orders').value, stock: $('stock').value, paymentFailPct: $('pay').value, publishFailPct: $('pub').value, seed: $('seed').value });
+    $('lanes').innerHTML = d.orders.map(o => `<div class="lane"><b>주문 ${String(o.no).padStart(2, '0')} · ${o.endMs - o.startMs}ms</b><span class="chip ${LABEL[o.status][1]}">${LABEL[o.status][0]}</span></div>`).join('');
+    $('mStock').textContent = d.finalStock; $('mExpect').textContent = d.expectedStock;
+    $('mPaid').textContent = d.paid; $('mComp').textContent = `${d.compensated} / ${d.soldOut}`;
+    const over = d.paid > d.options.stock;
+    $('verdict').className = 'verdict ' + (d.consistent ? 'ok' : 'bad');
+    $('verdict').textContent = d.consistent ? `정합성 유지 · DB 재고 ${d.finalStock} = 기대 재고 ${d.expectedStock}`
+      : `불일치 · DB 재고 ${d.finalStock}, 기대 재고 ${d.expectedStock}${over ? ` · 재고 ${d.options.stock}개인데 ${d.paid}건 판매(초과 판매)` : ''}`;
+    const ob = d.outbox;
+    $('oEvents').textContent = ob.events; $('oConsumed').textContent = ob.consumed; $('oDup').textContent = ob.duplicatesIgnored;
+    $('oNote').textContent = `릴레이 ${ob.rounds}회 · 전달 실패 후 재시도 ${ob.publishFailures}건 · 응답 유실로 재전송 ${ob.lostAcks}건 · 남은 이벤트 ${ob.pending}건`;
+    history.unshift(`<tr><td>${mode === 'NONE' ? '락 없음' : '비관적 락'}</td><td>${d.paid}/${d.options.stock}</td><td>${d.finalStock}</td><td>${d.expectedStock}</td><td><span class="chip ${d.consistent ? 'ok' : 'bad'}">${d.consistent ? '일치' : '불일치'}</span></td></tr>`);
+    $('hist').innerHTML = history.slice(0, 6).join('');
+  } catch (e) {
+    $('verdict').textContent = '실행 실패';
+  } finally { $('run').disabled = false; }
+};
+if (location.hash === '#auto') $('run').click();
+</script>
+</body></html>

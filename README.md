@@ -1,13 +1,19 @@
 # rate-fanout
 
-금융사 12곳에 대출 조건을 묻고, 모인 결과를 금리순으로 돌려주는 API입니다. 기관마다 응답 시간이 다르고 일부는 에러를 내거나 늦게 응답하는 상황에서, **전체 응답 시간을 가장 느린 호출 수준으로 묶고 한 기관의 실패가 전체 실패로 번지지 않게** 만드는 것이 목표입니다.
+외부 호출과 동시 요청이 얽히는 백엔드 문제 세 가지를 실제 서버와 DB 트랜잭션으로 돌려 보는 데모입니다. 화면에서 방식을 바꿔 실행하면 서버가 처리한 결과가 그대로 나옵니다.
+
+| 화면 | 문제 | 비교하는 방식 |
+|---|---|---|
+| 대출 조건 병렬 조회 | 금융사 12곳 호출을 가장 느린 호출 수준으로 묶고, 한 곳의 실패가 전체 실패로 번지지 않게 | 순차 vs 코루틴 병렬, 타임아웃·재시도·동시 호출 제한 |
+| 주문 재고 정합성 | 여러 POS에서 같은 상품을 동시에 주문할 때 재고가 어긋나지 않게, 결제 실패 시 재고 복구, 이벤트 중복 처리 | 락 없음 vs 비관적 락, 보상 트랜잭션, 트랜잭셔널 아웃박스 |
+| 선착순 쿠폰 발급 | 요청이 몰릴 때 한정 수량을 넘기지 않고, 같은 사용자에게 두 번 주지 않게 | 락 없음 vs 비관적 락 vs 조건부 UPDATE |
 
 - 데모: (배포 후 Vercel 주소)
-- API: (배포 후 Render 주소)/api/quotes
+- API: (배포 후 Render 주소)
 
 ## 스택
 
-Kotlin 2.4 · Spring Boot 4.2 (WebFlux) · Kotlin Coroutines · WebClient · JUnit 5 · kotlinx-coroutines-test
+Kotlin 2.4 · Spring Boot 4.2 (WebFlux) · Kotlin Coroutines · WebClient · JDBC (JdbcClient, TransactionTemplate) · H2 · JUnit 5 · kotlinx-coroutines-test
 
 ## 구조
 
@@ -17,12 +23,17 @@ api/   Spring Boot 서버
   quote/InstitutionClient.kt    WebClient로 금융사 API 호출 (논블로킹)
   quote/QuoteController.kt      GET /api/quotes
   mock/MockInstitutionController.kt  가상의 금융사 API (지연·에러 재현)
-web/   정적 화면 (Vercel)
+  order/OrderSimulator.kt       동시 주문: 재고 차감, 보상 트랜잭션, 아웃박스 릴레이
+  coupon/CouponSimulator.kt     선착순 발급: 락 없음·비관적 락·조건부 UPDATE
+  SimulationController.kt       POST /api/orders/run, POST /api/coupons/run
+web/   정적 화면 (Vercel): index.html, orders.html, coupon.html
 ```
 
 모의 금융사 API는 같은 서버 안에 있지만 **실제 HTTP로** 호출합니다. 같은 `scenario` 번호면 기관별 지연과 에러가 똑같이 재현되므로 순차와 병렬을 같은 조건에서 비교할 수 있습니다. 기관 10%는 빠르게 에러를 내고, 10%는 2.5~5초 늦게 응답하며, 나머지는 0.25~1.55초 안에 응답합니다.
 
-## API
+## 1. 대출 조건 병렬 조회
+
+### API
 
 ```
 GET /api/quotes?strategy=PARALLEL&timeoutMs=2000&retries=1&concurrency=12&scenario=7
@@ -38,7 +49,7 @@ GET /api/quotes?strategy=PARALLEL&timeoutMs=2000&retries=1&concurrency=12&scenar
 
 응답에는 전체 소요 시간(`totalMs`), 성공 기관의 금리순 목록(`offers`), 기관별 호출 기록(`results[].attempts`, 요청 시작 기준 ms)이 담깁니다.
 
-## 설계에서 고른 것
+### 설계에서 고른 것
 
 **병렬 호출은 코루틴 `async` + `awaitAll`.** 호출은 WebClient(`awaitBody`)라서 응답을 기다리는 동안 스레드를 잡지 않습니다. 12곳을 동시에 기다려도 스레드 12개가 필요하지 않습니다.
 
@@ -49,6 +60,62 @@ GET /api/quotes?strategy=PARALLEL&timeoutMs=2000&retries=1&concurrency=12&scenar
 **실패를 예외가 아니라 결과로 담음.** `awaitAll`은 자식 하나가 예외를 던지면 나머지를 모두 취소합니다. 그래서 기관 호출 안에서 실패를 잡아 `ERROR`/`TIMEOUT` 결과로 바꾸고, 성공한 기관만으로 응답합니다(부분 응답). 다만 `CancellationException`은 삼키지 않고 다시 던집니다. 요청 자체가 취소됐을 때 코루틴이 멈추지 않는 문제를 막기 위해서입니다.
 
 **동시 호출 수는 `Semaphore`로 제한.** 외부 기관의 호출 제한이나 커넥션 풀을 넘지 않게 합니다.
+
+## 2. 주문 재고 정합성
+
+```
+POST /api/orders/run?mode=PESSIMISTIC&orders=20&stock=10&paymentFailPct=20&publishFailPct=25&gapMs=30&seed=1
+```
+
+주문마다 `재고 차감 → 커밋 → 외부 결제 승인` 순서로 처리하고, 승인이 실패하면 재고를 되돌립니다. 실행마다 상품 행을 새로 만들고 끝나면 지웁니다.
+
+| 파라미터 | 기본값 | 범위 | 설명 |
+|---|---|---|---|
+| mode | PESSIMISTIC | NONE, PESSIMISTIC | 재고 차감 방식 |
+| orders | 20 | 1–60 | 동시 주문 수 |
+| stock | 10 | 1–60 | 초기 재고 |
+| paymentFailPct | 20 | 0–50 | 결제 승인 실패율(%) |
+| publishFailPct | 25 | 0–50 | 이벤트 발행 실패율(%). 절반은 전달 실패, 절반은 전달 후 응답 유실 |
+| gapMs | 30 | 0–100 | 재고 조회와 저장 사이 처리 시간 |
+| seed | 1 | 1–1000000 | 결제 지연·실패와 발행 실패 시드 |
+
+**락 없이 조회 후 저장하면 차감이 사라짐.** 두 주문이 같은 재고 값을 읽고 각자 1을 빼서 저장하면 차감 하나가 덮어써집니다(lost update). 재고 10개에 20건을 넣으면 결제 완료가 재고보다 많아집니다.
+
+**비관적 락(`SELECT … FOR UPDATE`).** 같은 상품의 차감을 줄 세웁니다. 결제 승인은 트랜잭션 밖에서 기다려서, 외부 응답을 기다리는 동안 락과 커넥션을 잡지 않습니다.
+
+**보상 트랜잭션.** 외부 승인은 DB 트랜잭션으로 묶을 수 없어서, 실패하면 이미 커밋한 차감을 반대 연산(재고 +1)으로 되돌립니다.
+
+**트랜잭셔널 아웃박스.** 재고 변경과 같은 트랜잭션에 이벤트를 기록하므로, 재고는 바뀌었는데 이벤트가 사라지는 일이 없습니다. 릴레이는 발행에 실패하면 남겨 두고 다음 주기에 다시 보내고, 전달은 됐지만 응답을 못 받으면 같은 이벤트를 또 보냅니다(at-least-once). 컨슈머는 `eventId` 유니크 키로 중복을 걸러 이벤트마다 한 번만 처리합니다. 실서비스에서는 릴레이가 스케줄러로 돌지만, 데모에서는 결과를 한 번에 보여 주려고 주문이 끝난 뒤 같은 요청 안에서 돌립니다.
+
+## 3. 선착순 쿠폰 발급
+
+```
+POST /api/coupons/run?mode=CONDITIONAL&requests=300&users=250&quantity=100&gapMs=5
+```
+
+| 파라미터 | 기본값 | 범위 | 설명 |
+|---|---|---|---|
+| mode | CONDITIONAL | NONE, PESSIMISTIC, CONDITIONAL | 발급 방식 |
+| requests | 300 | 1–1000 | 동시 요청 수 |
+| users | 250 | 1–1000 | 사용자 수. 요청보다 적으면 같은 사용자가 연달아 누른 요청이 생긴다 |
+| quantity | 100 | 1–1000 | 발급 수량 |
+| gapMs | 5 | 0–20 | 발급 자격 확인 등 처리 시간 |
+
+**조건부 UPDATE.** `UPDATE coupon SET remaining = remaining - 1 WHERE id = ? AND remaining > 0` 한 문장으로 확인과 차감을 같이 합니다. 갱신된 행이 0이면 품절입니다. 처리 시간을 락 밖에서 쓰고, 행 잠금은 이 문장 동안만 잡습니다.
+
+**비관적 락과의 차이.** 둘 다 수량을 지키지만, 비관적 락은 처리 시간 동안 쿠폰 행 하나의 락을 잡고 있어 모든 요청이 한 줄로 섭니다. 요청이 몰릴수록 대기 시간이 처리 시간 × 요청 수로 늘어납니다.
+
+**중복 발급은 유니크 키로.** (쿠폰, 사용자) 유니크 키에 걸리면 트랜잭션이 롤백돼 차감도 함께 되돌아갑니다.
+
+### 로컬 실측
+
+기본값으로 3회 실행했습니다(H2 인메모리, 커넥션 10개).
+
+| | 주문: 판매 / 재고 10 | 주문: DB 재고 = 기대 재고 | 쿠폰: 발급 / 수량 100 | 쿠폰 대기 p95 |
+|---|---|---|---|---|
+| 락 없음 | 12–16건 (초과 판매) | 불일치 3/3 | 250건 (초과 발급) | 177–288ms |
+| 비관적 락 | 8–9건 | 일치 3/3 | 100건 | 1603–1713ms |
+| 조건부 UPDATE | - | - | 100건 | 159–165ms |
 
 ## 테스트
 
@@ -62,18 +129,24 @@ cd api && ./gradlew test
   - 타임아웃 1초면 4초짜리 기관을 기다리지 않고 1000ms에 응답, 나머지 2곳으로 결과 반환
   - 에러 후 재시도 성공, 재시도를 다 써도 전체 요청은 실패하지 않음
 - `ApiApplicationTests`: 실제 서버를 띄워 HTTP로 12곳을 호출합니다. 같은 시나리오에서 병렬이 순차보다 3배 넘게 빠르고 기관별 결과가 같은지, 잘못된 파라미터에 400을 주는지 확인합니다.
+- `SimulationTests`: 실제 DB 트랜잭션으로 돌립니다.
+  - 비관적 락이면 DB 재고 = 초기 재고 − 결제 완료, 락이 없으면 어긋남
+  - 발행 실패율 50%에서도 남은 이벤트 0건, 컨슈머는 이벤트마다 정확히 한 번 처리, 중복 전달은 무시
+  - 조건부 UPDATE와 비관적 락은 정확히 수량만큼 발급, 락이 없으면 초과 발급
 
-로컬 실측(시나리오 7, 타임아웃 2초, 재시도 1회): 순차 13.2초, 병렬 1.76초.
+대출 조회 로컬 실측(시나리오 7, 타임아웃 2초, 재시도 1회): 순차 13.2초, 병렬 1.76초.
 
 ## 실행
 
 ```
 cd api && ./gradlew bootRun          # http://localhost:8080
-# 화면: web/index.html 을 열고 ?api=http://localhost:8080 를 붙인다
+# 화면: web/index.html 을 열고 ?api=http://localhost:8080 를 붙인다 (orders.html, coupon.html 도 같다)
 ```
 
 ## 아직 하지 않은 것
 
+- 실제 메시지 브로커: 아웃박스 릴레이는 브로커 대신 같은 DB의 컨슈머 테이블로 전달을 흉내 낸다
+- 쿠폰 앞단 Redis: 수량을 Redis 원자 연산으로 먼저 걸러 DB까지 오는 요청을 줄이는 방식
 - 결과 캐시: 같은 사용자가 짧은 시간에 다시 조회하면 기관 호출을 생략하는 캐시(Redis TTL)
 - 서킷 브레이커: 계속 실패하는 기관은 일정 시간 호출 자체를 건너뛰기
 - 부하 테스트: 동시 사용자 수에 따른 처리량·p95 (k6)
