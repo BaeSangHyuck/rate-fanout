@@ -14,9 +14,9 @@ import reactor.netty.resources.ConnectionProvider
 @Component
 class HttpInstitutionClient(
   @Value("\${app.mock.base-url}") baseUrl: String,
-  // 요청 하나가 기관 12곳을 동시에 부르니, 동시 요청 수 × 12만큼 커넥션이 필요하다.
-  // Reactor Netty 기본값(코어 수 × 2, 최소 16)이면 부하 때 풀 앞에서 기다리다 타임아웃으로 떨어진다. 0이면 기본값
-  @Value("\${app.quote.max-connections:500}") maxConnections: Int,
+  // 동시에 필요한 커넥션 = 초당 조회 수 × 기관 12곳 × 호출당 시간(약 1초). 60rps면 700~900개다.
+  // 기본값(코어 수 × 2)이나 500이면 풀 앞에서 기다리다 타임아웃·즉시 에러로 떨어진다(loadtest 결과). 0이면 Reactor Netty 기본값
+  @Value("\${app.quote.max-connections:2000}") maxConnections: Int,
   env: Environment,
 ) : InstitutionClient {
   // 포트는 서버가 다 뜬 다음에 정해져서 첫 호출 때 만든다
