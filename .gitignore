@@ -22,3 +22,6 @@ loadtest/*.html
 .DS_Store
 Thumbs.db
 .vscode/
+
+# md에서 만든 pdf는 로컬 제출용
+docs/*.pdf

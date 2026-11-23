@@ -40,7 +40,7 @@ api/
                                     JPA 어댑터, RedisCouponIssueGate(Redisson + Lua)
   monolith/fanout-app               부트 앱, <도메인>/presentation/restapi 컨트롤러, 모의 금융사 API, Flyway 마이그레이션
 web/   정적 화면 (Vercel): index.html, orders.html, coupon.html
-loadtest/coupon.js   k6 부하 테스트
+loadtest/            k6 부하 테스트 (coupon-issue.js, quote.js), 결과는 docs/load-test.md
 docker-compose.yml   로컬 Postgres·Redis·Kafka
 ```
 
@@ -138,6 +138,18 @@ POST /api/coupons/run?mode=CONDITIONAL&requests=300&users=250&quantity=100&gapMs
 | 비관적 락 | 8–9건 | 일치 3/3 | 100건 | 1603–1713ms |
 | 조건부 UPDATE | - | - | 100건 | 159–165ms |
 
+## 부하 테스트
+
+GitHub Actions 러너(4 vCPU)에 Postgres·Redis와 함께 띄우고 k6로 초당 요청 수를 단계적으로 올렸습니다. 전체 결과와 원인 분석, 대응은 [docs/load-test.md](docs/load-test.md)에 있습니다.
+
+- **쿠폰 발급**(수량 5,000, 목표 초당 1,500건)
+  - 비관적 락은 초당 140~170건에서 막혀 요청의 51%가 10초를 넘겼습니다. 락을 기다리는 요청이 커넥션 10개를 모두 쥐고, 대기가 54건에 묶였습니다.
+  - 조건부 UPDATE와 Redis 게이트는 초당 883건을 실패 없이 처리했습니다. p95는 각각 8ms, 7ms였습니다.
+  - 모든 실행에서 초과 발급은 0건이었습니다.
+- **대출 조회 fan-out**: 초당 60건에서 기관 호출 타임아웃이 기준선 11.7%에서 44.6%로 올랐습니다.
+  - CPU와 스레드에는 여유가 있었습니다. 모의 기관을 분리하고 구간별로 시간을 재 보니, 원인은 WebClient 커넥션 풀 부족이었습니다.
+  - 리틀의 법칙으로 필요한 커넥션 수(약 900)를 계산해 풀을 2000으로 늘렸습니다. 이후 초당 120건까지 기준선과 같았습니다(타임아웃 11.2%, p95 2.33초).
+
 ## 테스트
 
 ```
@@ -167,7 +179,7 @@ cd api && ./gradlew :monolith:fanout-app:bootRun   # http://localhost:8080, 인�
 # 화면: web/index.html 을 열고 ?api=http://localhost:8080 를 붙인다 (orders.html, coupon.html 도 같다)
 ```
 
-배포 구성(Postgres + Redis + Kafka)으로 띄우려면 `docker compose up -d` 뒤 `docker-compose.yml` 맨 위 주석의 환경변수로 실행합니다. 부하 테스트는 `k6 run -e BASE=http://localhost:8080 loadtest/coupon.js`.
+배포 구성(Postgres + Redis + Kafka)으로 띄우려면 `docker compose up -d` 뒤 `docker-compose.yml` 맨 위 주석의 환경변수로 실행합니다. 부하 테스트는 `k6 run -e BASE=http://localhost:8080 -e MODE=CONDITIONAL loadtest/coupon-issue.js`, 또는 GitHub Actions의 `loadtest` 워크플로를 수동 실행합니다.
 
 ### 배포
 
@@ -181,5 +193,4 @@ cd api && ./gradlew :monolith:fanout-app:bootRun   # http://localhost:8080, 인�
 - 아웃박스 릴레이 스케줄러: 지금은 요청 안에서 한 번 돈다
 - 결과 캐시: 같은 사용자가 짧은 시간에 다시 조회하면 기관 호출을 생략하는 캐시(Redis TTL)
 - 서킷 브레이커: 계속 실패하는 기관은 일정 시간 호출 자체를 건너뛰기
-- 부하 테스트 결과: k6 스크립트만 있고 수치는 아직 측정하지 않았다
 - QueryDSL: 조회가 단건·집계뿐이라 Spring Data 쿼리 메서드와 JPQL로 충분했다

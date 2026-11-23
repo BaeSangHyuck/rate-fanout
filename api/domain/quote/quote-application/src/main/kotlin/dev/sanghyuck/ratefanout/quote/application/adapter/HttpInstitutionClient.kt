@@ -15,7 +15,7 @@ import reactor.netty.resources.ConnectionProvider
 class HttpInstitutionClient(
   @Value("\${app.mock.base-url}") baseUrl: String,
   // 동시에 필요한 커넥션 = 초당 조회 수 × 기관 12곳 × 호출당 시간(약 1초). 60rps면 700~900개다.
-  // 기본값(코어 수 × 2)이나 500이면 풀 앞에서 기다리다 타임아웃·즉시 에러로 떨어진다(loadtest 결과). 0이면 Reactor Netty 기본값
+  // Reactor Netty 기본 풀이나 500이면 풀 앞에서 기다리다 타임아웃·즉시 에러로 떨어졌다(docs/load-test.md). 0이면 기본 풀
   @Value("\${app.quote.max-connections:2000}") maxConnections: Int,
   env: Environment,
 ) : InstitutionClient {
@@ -24,7 +24,8 @@ class HttpInstitutionClient(
     val url = baseUrl.ifBlank { "http://localhost:${env.getRequiredProperty("local.server.port")}" }
     val builder = WebClient.builder().baseUrl(url)
     if (maxConnections > 0) {
-      val pool = ConnectionProvider.builder("institution").maxConnections(maxConnections).build()
+      // metrics(true): 풀의 사용 중·대기 커넥션 수를 프로메테우스로 내보낸다. 이번 병목도 이 지표가 있었으면 바로 보였다
+      val pool = ConnectionProvider.builder("institution").maxConnections(maxConnections).metrics(true).build()
       builder.clientConnector(ReactorClientHttpConnector(HttpClient.create(pool)))
     }
     builder.build()
