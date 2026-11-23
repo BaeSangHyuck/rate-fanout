@@ -1,0 +1,7 @@
+api/build/
+api/.gradle/
+.gradle/
+.idea/
+*.iml
+.vercel/
+README.pdf

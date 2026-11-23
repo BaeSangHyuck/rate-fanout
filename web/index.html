@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate Fan-out</title>
+<meta name="description" content="금융사 12곳 대출 조건을 Kotlin 코루틴으로 병렬 조회하는 Spring WebFlux 데모">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="style.css">
+<style>
+  :root { --c: #5b4ee6; --c-soft: #f0eeff; }
+  .row { display: grid; grid-template-columns: 72px 1fr 92px; align-items: center; gap: 8px; height: 26px; font-size: 12.5px; }
+  .track { position: relative; height: 14px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .bar { position: absolute; top: 0; height: 100%; border-radius: 4px; background: var(--c); transition: width .7s ease-out; width: 0; }
+  .bar.ERROR { background: var(--bad); } .bar.TIMEOUT { background: var(--warn); } .bar.retry { background: #8f86f0; }
+  .axis { display: grid; grid-template-columns: 72px 1fr 92px; gap: 8px; font-size: 11px; color: var(--mut); margin-top: 4px; }
+  .cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .metric.on { outline: 2px solid var(--c); }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--bg); padding: 2px 6px; border-radius: 5px; word-break: break-all; }
+  .status { font-size: 13px; color: var(--mut); min-height: 20px; margin-top: 10px; }
+  .stackline span { display: inline-block; font-size: 12px; background: #fff; border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; margin: 0 4px 6px 0; }
+</style></head>
+<body><div class="wrap">
+  <span class="pill">Kotlin · Spring WebFlux · Coroutines</span>
+  <h1>금융사 대출 조건 병렬 조회</h1>
+  <p class="lead">사용자 한 명의 대출 조건을 금융사 12곳에 묻고, 모인 결과를 금리순으로 돌려주는 API입니다. 기관마다 응답 시간이 다르고 일부는 에러를 내거나 늦게 응답합니다. 아래 버튼을 누르면 <b>실제 서버</b>가 모의 금융사 API 12곳을 HTTP로 호출하고, 그 결과를 그대로 그립니다.</p>
+  <div class="stackline"><span>Kotlin 2.4</span><span>Spring Boot 4.2 · WebFlux</span><span>Coroutines async/awaitAll</span><span>WebClient (논블로킹)</span><span>Semaphore 동시 호출 제한</span><span>withTimeout · 에러 재시도</span></div>
+
+  <div class="card" style="margin-top:8px">
+    <div class="controls">
+      <label>호출 방식
+        <span class="seg" id="mode"><button data-v="SEQUENTIAL">순차 호출</button><button data-v="PARALLEL" class="on">병렬 fan-out</button></span></label>
+      <label>동시 호출 제한
+        <select id="conc"><option value="12">12 (제한 없음)</option><option value="4">4</option></select></label>
+      <label>기관별 타임아웃
+        <select id="to"><option value="1200">1.2초</option><option value="2000" selected>2초</option><option value="5000">5초</option></select></label>
+      <label>에러 시 재시도
+        <select id="retry"><option value="0">안 함</option><option value="1" selected>1회</option></select></label>
+      <label>시나리오 번호<input type="number" id="scenario" value="7" min="1" max="1000000"></label>
+      <button class="btn" id="run">조회 실행</button>
+      <button class="btn ghost" id="reseed">새 시나리오</button>
+    </div>
+    <div class="grid g2">
+      <div>
+        <h3>기관별 호출 타임라인 <span class="muted">· 서버가 기록한 실제 시각</span></h3>
+        <div id="gantt"><p class="muted">조회를 실행하면 서버 응답으로 그려집니다.</p></div>
+        <div class="axis"><span></span><span id="axis"></span><span></span></div>
+        <p class="muted" style="margin-top:8px"><span class="chip c">성공</span> <span class="chip" style="background:#efedff;color:#8f86f0">재시도 성공</span> <span class="chip bad">에러</span> <span class="chip warn">타임아웃</span></p>
+      </div>
+      <div>
+        <h3>서버 응답 시간 <span class="muted">· 같은 시나리오</span></h3>
+        <div class="cmp">
+          <div class="metric" id="mSEQUENTIAL"><div class="v" id="tSEQUENTIAL">-</div><div class="l">순차 호출</div></div>
+          <div class="metric" id="mPARALLEL"><div class="v" id="tPARALLEL">-</div><div class="l">병렬 fan-out</div></div>
+        </div>
+        <div class="verdict idle" id="verdict">같은 시나리오 번호면 기관별 지연·에러가 똑같이 재현됩니다.</div>
+        <h3 style="margin-top:16px">비교 결과 (부분 응답)</h3>
+        <table><thead><tr><th>기관</th><th>금리</th><th>한도</th></tr></thead><tbody id="offers"><tr><td colspan="3" class="muted">실행 전</td></tr></tbody></table>
+        <p class="muted" id="failed" style="margin-top:8px"></p>
+      </div>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card">
+      <h3>어떻게 동작하나</h3>
+      <p class="muted"><b>병렬 fan-out</b>: 기관마다 코루틴을 띄워(<code>async</code>) 동시에 호출하고 <code>awaitAll</code>로 모읍니다. HTTP 호출은 WebClient라서 응답을 기다리는 동안 스레드를 잡지 않습니다. 전체 응답 시간은 합이 아니라 <b>가장 늦게 끝난 호출</b>로 정해집니다.</p>
+      <p class="muted" style="margin-top:8px"><b>타임아웃</b>: 호출마다 <code>withTimeout</code>을 걸어, 늦는 기관 하나 때문에 전체가 늦어지지 않게 합니다. 타임아웃은 재시도하지 않습니다. 이미 느린 기관을 다시 기다리면 그만큼 응답이 늦어지기 때문입니다.</p>
+      <p class="muted" style="margin-top:8px"><b>부분 응답</b>: 기관 실패를 예외로 올리지 않고 결과에 담습니다. 한 곳이 실패해도 나머지로 비교 결과를 돌려줍니다.</p>
+      <p class="muted" style="margin-top:8px"><b>동시 호출 제한</b>: <code>Semaphore</code>로 동시에 나가는 요청 수를 묶습니다. 외부 기관의 호출 제한이나 커넥션 풀을 넘지 않기 위해서입니다.</p>
+    </div>
+    <div class="card">
+      <h3>직접 호출해 보기</h3>
+      <p class="muted">마지막 요청</p>
+      <p style="margin:4px 0 12px"><code id="reqUrl">-</code></p>
+      <p class="muted">소스 코드와 테스트 (가상 시간으로 지연·타임아웃·재시도를 ms 단위로 검증)</p>
+      <p style="margin-top:4px"><a href="https://github.com/BaeSangHyuck/rate-fanout" target="_blank" rel="noopener">github.com/BaeSangHyuck/rate-fanout</a></p>
+      <p class="note">모의 금융사 API는 같은 서버 안에 있지만 실제 HTTP로 호출합니다. 기관명·금리·지연은 가상의 값이고, 서버는 무료 호스팅이라 한동안 요청이 없으면 첫 응답이 30초~1분 늦을 수 있습니다.</p>
+    </div>
+  </div>
+</div>
+<script src="config.js"></script>
+<script>
+// 배포한 API 주소. ?api=http://localhost:8080 으로 덮어쓸 수 있다
+const API = new URLSearchParams(location.search).get('api') || window.API_BASE || 'http://localhost:8080';
+const $ = id => document.getElementById(id);
+let mode = 'PARALLEL';
+document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('on', x === b)); mode = b.dataset.v;
+});
+const fmt = ms => (ms / 1000).toFixed(2) + '초';
+const LABEL = { OK: '성공', RETRY: '재시도 성공', ERROR: '에러', TIMEOUT: '타임아웃' };
+const CHIP = { OK: 'c', RETRY: '', ERROR: 'bad', TIMEOUT: 'warn' };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function url(strategy) {
+  const q = new URLSearchParams({ strategy, timeoutMs: $('to').value, retries: $('retry').value, concurrency: $('conc').value, scenario: $('scenario').value });
+  return `${API}/api/quotes?${q}`;
+}
+async function get(strategy) {
+  const res = await fetch(url(strategy));
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function draw(d) {
+  const scale = Math.max(d.totalMs, 1);
+  $('gantt').innerHTML = d.results.map((r, i) => {
+    const state = r.outcome === 'OK' && r.attempts.length > 1 ? 'RETRY' : r.outcome;
+    const bars = r.attempts.map((a, j) => {
+      const cls = a.outcome === 'OK' && j > 0 ? 'retry' : a.outcome === 'OK' ? '' : a.outcome;
+      return `<div class="bar ${cls}" style="left:${a.startMs / scale * 100}%" data-w="${(a.endMs - a.startMs) / scale * 100}"></div>`;
+    }).join('');
+    return `<div class="row"><span>${esc(r.name)}</span><div class="track">${bars}</div><span><span class="chip ${CHIP[state]}">${LABEL[state]}</span></span></div>`;
+  }).join('');
+  requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll('.bar').forEach(b => b.style.width = b.dataset.w + '%')));
+  $('axis').innerHTML = `<div style="display:flex;justify-content:space-between"><span>0초</span><span>${fmt(scale / 2)}</span><span>${fmt(scale)}</span></div>`;
+  $('offers').innerHTML = d.offers.slice(0, 6).map(r => `<tr><td>${esc(r.name)}</td><td>${r.quote.rate.toFixed(2)}%</td><td>${r.quote.limit.toLocaleString()}만원</td></tr>`).join('') || '<tr><td colspan="3" class="muted">성공한 기관 없음</td></tr>';
+  const bad = d.results.filter(r => r.outcome !== 'OK');
+  $('failed').textContent = bad.length ? `응답 ${d.succeeded}/${d.results.length}곳으로 결과 반환 · ${bad.map(r => r.name).join(', ')}는 결과에서 제외` : `${d.results.length}곳 모두 응답`;
+}
+
+function compare() {
+  const s = parseFloat($('tSEQUENTIAL').dataset.ms), p = parseFloat($('tPARALLEL').dataset.ms);
+  if (!(s && p)) return;
+  $('verdict').className = 'verdict ok';
+  $('verdict').textContent = `병렬 fan-out이 순차 호출보다 ${(s / p).toFixed(1)}배 빠름 · 응답 시간 = 가장 늦게 끝난 호출`;
+}
+
+$('reseed').onclick = () => { $('scenario').value = Math.floor(Math.random() * 1e6) + 1; $('run').click(); };
+$('run').onclick = async () => {
+  const other = mode === 'PARALLEL' ? 'SEQUENTIAL' : 'PARALLEL';
+  ['SEQUENTIAL', 'PARALLEL'].forEach(k => { $('t' + k).textContent = '…'; delete $('t' + k).dataset.ms; $('m' + k).classList.toggle('on', k === mode); });
+  $('verdict').className = 'verdict idle'; $('verdict').textContent = '서버 응답을 기다리는 중…';
+  $('run').disabled = $('reseed').disabled = true;
+  $('reqUrl').textContent = url(mode);
+  const t0 = performance.now();
+  const tick = setInterval(() => $('status').textContent = `요청 중 ${((performance.now() - t0) / 1000).toFixed(1)}초${performance.now() - t0 > 8000 ? ' · 무료 서버가 잠들어 있었다면 깨어나는 데 시간이 걸립니다' : ''}`, 100);
+  const put = (k, d) => { $('t' + k).textContent = fmt(d.totalMs); $('t' + k).dataset.ms = d.totalMs; compare(); };
+  // 비교용 반대 방식도 같은 시나리오로 함께 요청한다
+  const side = get(other).then(d => put(other, d)).catch(() => { $('t' + other).textContent = '실패'; });
+  try {
+    const d = await get(mode);
+    put(mode, d); draw(d);
+    $('status').textContent = '';
+  } catch (e) {
+    $('status').textContent = `API 호출 실패 (${e.message}). 서버가 깨어나는 중일 수 있으니 잠시 뒤 다시 눌러 주세요.`;
+  } finally {
+    clearInterval(tick);
+    await side;
+    $('run').disabled = $('reseed').disabled = false;
+  }
+};
+</script>
+</body></html>
