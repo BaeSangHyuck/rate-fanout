@@ -16,6 +16,10 @@ on:
       app_env:
         description: 앱에 추가로 줄 환경변수 (KEY=VALUE 공백 구분, 비교 실험용)
         default: ""
+      separate_mock:
+        description: 모의 금융사를 별도 프로세스(8081)로 띄워 앱과 자원을 나눈다
+        type: boolean
+        default: false
 
 jobs:
   loadtest:
@@ -41,10 +45,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew :monolith:fanout-app:bootJar --no-daemon
         working-directory: api
+      - name: start separate mock
+        if: inputs.separate_mock
+        run: |
+          mkdir -p results
+          PORT=8081 nohup java -jar api/monolith/fanout-app/build/libs/*.jar > results/mock.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:8081/actuator/health && break; sleep 1; done
+          echo "MOCK_URL=MOCK_BASE_URL=http://localhost:8081" >> $GITHUB_ENV
       - name: start app
         run: |
           mkdir -p results
-          env SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/fanout \
+          env ${MOCK_URL} SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/fanout \
               SPRING_DATASOURCE_USERNAME=fanout SPRING_DATASOURCE_PASSWORD=fanout \
               APP_REDIS_URL=redis://localhost:6379 PORT=8080 ${{ inputs.app_env }} \
               nohup java ${{ inputs.java_opts }} -jar api/monolith/fanout-app/build/libs/*.jar > results/app.log 2>&1 &
@@ -69,6 +80,8 @@ jobs:
           echo "QUOTE_BASELINE $(date +%s)" >> results/phases.txt
           k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=4 -e TAG=baseline loadtest/quote.js | tee results/quote-baseline.txt
           echo "QUOTE_PEAK $(date +%s)" >> results/phases.txt
+          # 최고 부하 구간에서 스레드 덤프를 떠서 어느 스레드가 일하고 있는지 본다
+          (sleep 45; for i in 1 2 3; do jcmd $(pgrep -f "fanout-app.*jar" | head -1) Thread.print > results/threads-$i.txt; sleep 3; done) &
           k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=${{ inputs.quote_peak_rps }} -e TAG=peak loadtest/quote.js | tee results/quote-peak.txt
           echo "END $(date +%s)" >> results/phases.txt
       - uses: actions/upload-artifact@v4
