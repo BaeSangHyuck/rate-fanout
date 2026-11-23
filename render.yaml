@@ -8,3 +8,22 @@ services:
     envVars:
       - key: CORS_ALLOWED_ORIGINS
         value: "*"
+      # Neon 대시보드의 연결 정보. jdbc:postgresql://<host>/<db>?sslmode=require 형태로 넣는다
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      - key: APP_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: rate-fanout-redis
+          property: connectionString
+
+  # 쿠폰 Redis 게이트용. 무료 플랜, 내부망에서만 접속
+  - type: keyvalue
+    name: rate-fanout-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: []

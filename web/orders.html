@@ -8,7 +8,7 @@
 </head>
 <body><div class="wrap">
   <nav class="nav"><a href="./">대출 조건 병렬 조회</a><a href="orders.html" class="on">주문 재고 정합성</a><a href="coupon.html">선착순 쿠폰 발급</a><a class="ext" href="https://github.com/BaeSangHyuck/rate-fanout" target="_blank" rel="noopener">GitHub</a></nav>
-  <span class="pill">Spring · JDBC 트랜잭션 · H2</span>
+  <span class="pill">Spring · JPA · Postgres · Outbox</span>
   <h1>매장 동시 주문과 재고 정합성</h1>
   <p class="lead">여러 POS에서 같은 상품 주문이 동시에 들어옵니다. 주문마다 <b>재고 차감 → 커밋 → 외부 결제 승인</b> 순서로 진행하고, 승인이 실패하면 보상 트랜잭션으로 재고를 되돌립니다. 버튼을 누르면 <b>실제 서버가 DB 트랜잭션으로</b> 주문을 동시에 처리하고, 끝난 뒤 DB 재고를 그대로 보여 줍니다.</p>
 
@@ -66,7 +66,7 @@
       <p style="margin-top:4px"><code id="reqUrl">-</code></p>
     </div>
   </div>
-  <p class="note">인메모리 H2 DB에서 실행합니다. 경합이 잘 보이도록 조회와 저장 사이에 30ms 처리 시간을 두었고, 결제 승인 지연(150–400ms)과 실패는 시드로 재현되는 모의 값입니다. 무료 서버라 한동안 요청이 없으면 첫 응답이 30초~1분 늦을 수 있습니다.</p>
+  <p class="note">Postgres에서 실행합니다. 아웃박스 이벤트는 배포 서버에서는 같은 프로세스 안의 컨슈머로, 로컬에서는 Kafka로 보낼 수 있습니다. 경합이 잘 보이도록 조회와 저장 사이에 30ms 처리 시간을 두었고, 결제 승인 지연(150–400ms)과 실패는 시드로 재현되는 모의 값입니다. 무료 서버라 한동안 요청이 없으면 첫 응답이 30초~1분 늦을 수 있습니다.</p>
 </div>
 <script src="config.js"></script>
 <script src="common.js"></script>

@@ -1,0 +1,21 @@
+# 배포 구성(Postgres + Redis + Kafka)을 로컬에서 띄울 때
+#   docker compose up -d
+#   cd api && SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/fanout SPRING_DATASOURCE_USERNAME=fanout \
+#     SPRING_DATASOURCE_PASSWORD=fanout APP_REDIS_URL=redis://localhost:6379 APP_KAFKA_ENABLED=true \
+#     SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 ./gradlew :monolith:fanout-app:bootRun
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: fanout
+      POSTGRES_USER: fanout
+      POSTGRES_PASSWORD: fanout
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7.4-alpine
+    ports: ["6379:6379"]
+
+  kafka:
+    image: apache/kafka:3.9.1 # KRaft 단일 노드라 주키퍼가 필요 없다
+    ports: ["9092:9092"]

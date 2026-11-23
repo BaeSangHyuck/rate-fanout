@@ -6,8 +6,9 @@
 <link rel="stylesheet" href="style.css">
 <style>
   :root { --c: #1f8f4e; --c-soft: #e6f4ec; }
-  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  @media (max-width: 860px) { .modes { grid-template-columns: 1fr; } }
+  .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 1100px) { .modes { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 640px) { .modes { grid-template-columns: 1fr; } }
   .mode h3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .mode .metrics { margin-top: 10px; }
   .mode .metric .v { font-size: 20px; }
@@ -15,9 +16,9 @@
 </head>
 <body><div class="wrap">
   <nav class="nav"><a href="./">대출 조건 병렬 조회</a><a href="orders.html">주문 재고 정합성</a><a href="coupon.html" class="on">선착순 쿠폰 발급</a><a class="ext" href="https://github.com/BaeSangHyuck/rate-fanout" target="_blank" rel="noopener">GitHub</a></nav>
-  <span class="pill">Spring · JDBC 트랜잭션 · H2</span>
+  <span class="pill">Spring · JPA · Postgres · Redis</span>
   <h1>세일 시작 직후 선착순 쿠폰 발급</h1>
-  <p class="lead">세일이 열리자마자 요청이 한꺼번에 몰리고, 한정 수량만 발급해야 합니다. 같은 사용자가 버튼을 여러 번 누르기도 합니다. 버튼을 누르면 <b>실제 서버가</b> 같은 요청 묶음을 세 가지 방식으로 차례로 처리하고, <b>초과 발급</b>과 <b>요청별 대기 시간</b>을 비교합니다.</p>
+  <p class="lead">세일이 열리자마자 요청이 한꺼번에 몰리고, 한정 수량만 발급해야 합니다. 같은 사용자가 버튼을 여러 번 누르기도 합니다. 버튼을 누르면 <b>실제 서버가</b> 같은 요청 묶음을 네 가지 방식으로 차례로 처리하고, <b>초과 발급</b>과 <b>요청별 대기 시간</b>을 비교합니다.</p>
 
   <div class="card">
     <div class="controls">
@@ -26,7 +27,7 @@
       <label>발급 수량<input type="number" id="quantity" value="100" min="1" max="1000"></label>
       <label>발급 처리 시간
         <select id="gap"><option value="2">2ms</option><option value="5" selected>5ms</option><option value="10">10ms</option></select></label>
-      <button class="btn" id="run">세 방식 실행</button>
+      <button class="btn" id="run">네 방식 실행</button>
     </div>
     <div class="modes" id="modes"></div>
     <div class="verdict idle" id="verdict">실행하면 방식별 결과가 채워집니다.</div>
@@ -39,21 +40,23 @@
       <p class="muted"><b>락 없음</b>: 남은 수량을 읽고 1을 빼 저장하는 사이에 다른 요청이 끼어들어, 수량보다 많이 발급됩니다.</p>
       <p class="muted" style="margin-top:8px"><b>비관적 락</b>: 초과 발급은 없지만 모든 요청이 쿠폰 행 하나의 락을 기다립니다. 처리 시간이 락 안에 있어 요청이 몰릴수록 대기 시간이 길어집니다.</p>
       <p class="muted" style="margin-top:8px"><b>조건부 차감</b>: <code>UPDATE … SET remaining = remaining - 1 WHERE remaining &gt; 0</code> 한 문장으로 확인과 차감을 같이 합니다. 처리 시간을 락 밖에서 쓰고, 행 잠금은 이 한 문장 동안만 잡습니다.</p>
-      <p class="muted" style="margin-top:8px"><b>중복 발급</b>: 세 방식 모두 (쿠폰, 사용자) 유니크 키로 막습니다. 위반하면 트랜잭션이 롤백돼 차감도 되돌아갑니다.</p>
+      <p class="muted" style="margin-top:8px"><b>Redis 게이트</b>: 남은 수량 확인·차감과 사용자 중복 확인을 Lua 스크립트 하나로 Redis에서 먼저 합니다. 통과한 요청(수량만큼)만 DB 트랜잭션까지 가고, 나머지는 커넥션도 잡지 않고 바로 돌아갑니다. DB 쪽은 조건부 차감으로 한 번 더 지킵니다.</p>
+      <p class="muted" style="margin-top:8px"><b>중복 발급</b>: 모든 방식에서 (쿠폰, 사용자) 유니크 키로 막습니다. 위반하면 트랜잭션이 롤백돼 차감도 되돌아갑니다.</p>
     </div>
     <div class="card">
       <h3>직접 호출해 보기</h3>
       <p class="muted">마지막 요청</p>
       <p style="margin:4px 0 12px"><code id="reqUrl">-</code></p>
-      <p class="note">인메모리 H2 DB와 커넥션 10개로 실행합니다. 대기 시간에는 커넥션을 기다린 시간도 들어갑니다. 실서비스라면 발급 수량 확인을 Redis 원자 연산으로 앞단에서 거르는 방법도 있는데, 이 데모에는 넣지 않았습니다. 무료 서버라 첫 응답이 30초~1분 늦을 수 있습니다.</p>
+      <p class="note">Postgres와 커넥션 10개로 실행합니다. 대기 시간에는 커넥션을 기다린 시간도 들어갑니다. 서버에 Redis가 연결돼 있지 않으면 Redis 게이트 칸은 건너뜁니다. 무료 서버라 첫 응답이 30초~1분 늦을 수 있습니다.</p>
     </div>
   </div>
 </div>
 <script src="config.js"></script>
 <script src="common.js"></script>
 <script>
-const MODES = [['NONE', '락 없음', '조회 후 저장'], ['PESSIMISTIC', '비관적 락', 'SELECT … FOR UPDATE'], ['CONDITIONAL', '조건부 차감', 'UPDATE … WHERE remaining > 0']];
+const MODES = [['NONE', '락 없음', '조회 후 저장'], ['PESSIMISTIC', '비관적 락', 'SELECT … FOR UPDATE'], ['CONDITIONAL', '조건부 차감', 'UPDATE … WHERE remaining > 0'], ['REDIS', 'Redis 게이트', 'Lua 스크립트로 먼저 거름']];
 function card([k, name, sub], d) {
+  if (d === 'off') return `<div class="mode card" style="padding:14px"><h3>${name} <span class="chip">Redis 미연결</span></h3><div class="muted">${sub}</div><p class="muted" style="margin-top:10px">이 서버에는 Redis가 연결돼 있지 않습니다.</p></div>`;
   const state = !d ? '<span class="chip">대기</span>' : d.overIssued ? `<span class="chip bad">초과 ${d.overIssued}건</span>` : '<span class="chip ok">수량 지킴</span>';
   const v = (x, f = y => y) => d ? f(x) : '-';
   return `<div class="mode card" style="padding:14px"><h3>${name} ${state}</h3><div class="muted">${sub}</div>
@@ -77,12 +80,14 @@ $('run').onclick = async () => {
     // 같은 서버 자원을 두고 겹치지 않도록 방식별로 차례로 실행한다
     for (const [k] of MODES) {
       $('verdict').className = 'verdict idle'; $('verdict').textContent = `${MODES.find(m => m[0] === k)[1]} 실행 중…`;
-      results[k] = await call('/api/coupons/run', { mode: k, requests: $('requests').value, users: $('users').value, quantity: $('quantity').value, gapMs: $('gap').value });
+      const params = { mode: k, requests: $('requests').value, users: $('users').value, quantity: $('quantity').value, gapMs: $('gap').value };
+      try { results[k] = await call('/api/coupons/run', params); }
+      catch (e) { if (k === 'REDIS' && e.message === 'HTTP 503') { results[k] = 'off'; $('status').textContent = ''; } else throw e; }
       paint();
     }
-    const L = results.PESSIMISTIC, C = results.CONDITIONAL, N = results.NONE;
+    const L = results.PESSIMISTIC, C = results.CONDITIONAL, N = results.NONE, R = results.REDIS;
     $('verdict').className = 'verdict ok';
-    $('verdict').textContent = `락 없음은 ${N.overIssued ? `${N.overIssued}건 초과 발급` : '이번엔 초과 없음(처리 시간을 늘려 보세요)'} · 대기 p95: 조건부 차감 ${C.p95Ms}ms, 비관적 락 ${L.p95Ms}ms`;
+    $('verdict').textContent = `락 없음은 ${N.overIssued ? `${N.overIssued}건 초과 발급` : '이번엔 초과 없음(처리 시간을 늘려 보세요)'} · 대기 p95: 조건부 차감 ${C.p95Ms}ms, 비관적 락 ${L.p95Ms}ms${R !== 'off' ? `, Redis 게이트 ${R.p95Ms}ms` : ''}`;
   } catch (e) {
     $('verdict').className = 'verdict bad'; $('verdict').textContent = '실행 실패';
   } finally { $('run').disabled = false; }

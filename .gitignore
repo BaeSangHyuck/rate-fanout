@@ -5,3 +5,20 @@ api/.gradle/
 *.iml
 .vercel/
 README.pdf
+
+# 로컬 환경값·비밀 (Neon 접속 정보 등)
+.env
+.env.*
+!.env.example
+*.local
+
+# 실행 산출물
+*.log
+.kotlin/
+loadtest/*.json
+loadtest/*.html
+
+# OS·에디터
+.DS_Store
+Thumbs.db
+.vscode/
