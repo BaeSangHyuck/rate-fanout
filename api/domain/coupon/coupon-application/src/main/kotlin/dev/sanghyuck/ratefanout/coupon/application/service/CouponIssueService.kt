@@ -4,6 +4,7 @@ import dev.sanghyuck.ratefanout.common.blockingIo
 import dev.sanghyuck.ratefanout.common.logger
 import dev.sanghyuck.ratefanout.coupon.application.dto.CouponRunRequestDto
 import dev.sanghyuck.ratefanout.coupon.application.dto.CouponRunResponseDto
+import dev.sanghyuck.ratefanout.coupon.application.dto.CouponStatsDto
 import dev.sanghyuck.ratefanout.coupon.domain.AlreadyIssuedException
 import dev.sanghyuck.ratefanout.coupon.domain.Coupon
 import dev.sanghyuck.ratefanout.coupon.domain.IssueMode
@@ -47,7 +48,7 @@ class CouponIssueService(
           // 사용자 수가 요청 수보다 적으면 옆 요청끼리 같은 사용자가 된다(버튼 연타)
           val userId = (index.toLong() * request.users / request.requests).toInt()
           async {
-            val status = blockingIo { issue(couponId, userId, request, gate) }
+            val status = blockingIo { issue(couponId, userId, request.mode, request.gapMs, gate) }
             status to elapsedMs()
           }
         }.awaitAll()
@@ -81,7 +82,28 @@ class CouponIssueService(
     }
   }
 
-  private fun issue(couponId: String, userId: Int, request: CouponRunRequestDto, gate: CouponIssueGate?): IssueStatus {
+  // 아래 세 개는 부하 테스트용. 사용자 한 명의 요청 하나가 HTTP 요청 하나가 되도록 쿠폰을 열어 두고 따로 발급한다
+  suspend fun open(quantity: Int): String {
+    val couponId = UUID.randomUUID().toString()
+    blockingIo {
+      couponRepository.create(couponId, Coupon(quantity))
+      couponIssueGate?.open(couponId, quantity)
+    }
+    return couponId
+  }
+
+  suspend fun issueOne(couponId: String, userId: Int, mode: IssueMode, gapMs: Long): IssueStatus {
+    val gate = if (mode == IssueMode.REDIS) checkNotNull(couponIssueGate) { "redis is not configured" } else null
+    return blockingIo { issue(couponId, userId, mode, gapMs, gate) }
+  }
+
+  suspend fun stats(couponId: String): CouponStatsDto {
+    return blockingIo {
+      CouponStatsDto(issued = couponIssueRepository.count(couponId), remaining = couponRepository.find(couponId).remaining)
+    }
+  }
+
+  private fun issue(couponId: String, userId: Int, mode: IssueMode, gapMs: Long, gate: CouponIssueGate?): IssueStatus {
     // 레디스에서 떨어진 요청은 DB 커넥션도 안 잡고 바로 돌아간다
     val passed = gate?.tryAcquire(couponId, userId) ?: IssueStatus.ISSUED
     if (passed != IssueStatus.ISSUED) {
@@ -89,7 +111,7 @@ class CouponIssueService(
     }
 
     return try {
-      couponCommandService.issue(couponId, userId, request.mode, request.gapMs)
+      couponCommandService.issue(couponId, userId, mode, gapMs)
     } catch (e: AlreadyIssuedException) {
       IssueStatus.DUPLICATE
     }

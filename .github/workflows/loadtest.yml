@@ -1,0 +1,74 @@
+name: loadtest
+
+# 수동 실행. 배포 구성(Postgres + Redis)을 러너에 띄우고 k6로 단계별 부하를 준다
+on:
+  workflow_dispatch:
+    inputs:
+      coupon_peak_rps:
+        description: 쿠폰 발급 최대 초당 요청 수
+        default: "400"
+      quote_peak_rps:
+        description: 대출 조회 최대 초당 요청 수
+        default: "60"
+      java_opts:
+        description: 앱 JVM 옵션 (비교 실험용)
+        default: ""
+      app_env:
+        description: 앱에 추가로 줄 환경변수 (KEY=VALUE 공백 구분, 비교 실험용)
+        default: ""
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: fanout
+          POSTGRES_USER: fanout
+          POSTGRES_PASSWORD: fanout
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U fanout" --health-interval 2s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :monolith:fanout-app:bootJar --no-daemon
+        working-directory: api
+      - name: start app
+        run: |
+          mkdir -p results
+          env SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/fanout \
+              SPRING_DATASOURCE_USERNAME=fanout SPRING_DATASOURCE_PASSWORD=fanout \
+              APP_REDIS_URL=redis://localhost:6379 PORT=8080 ${{ inputs.app_env }} \
+              nohup java ${{ inputs.java_opts }} -jar api/monolith/fanout-app/build/libs/*.jar > results/app.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:8080/actuator/health && break; sleep 1; done
+      - name: sample server metrics every second
+        run: |
+          nohup bash -c 'while true; do
+            echo "# $(date +%s)"
+            curl -s localhost:8080/actuator/prometheus | grep -E "^(hikaricp_connections_(active|pending|max)|process_cpu_usage|jvm_threads_live_threads|reactor_netty_connection_provider_.*(active|pending|max)_connections)"
+            sleep 1
+          done' > results/metrics.txt 2>&1 &
+      - uses: grafana/setup-k6-action@v1
+      - name: coupon issue
+        run: |
+          for mode in PESSIMISTIC CONDITIONAL REDIS; do
+            echo "=== $mode $(date +%s)" >> results/metrics.txt
+            k6 run --quiet -e BASE=http://localhost:8080 -e MODE=$mode -e PEAK_RPS=${{ inputs.coupon_peak_rps }} loadtest/coupon-issue.js | tee results/coupon-$mode.txt
+          done
+      - name: quote fan-out
+        run: |
+          echo "=== QUOTE $(date +%s)" >> results/metrics.txt
+          k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=${{ inputs.quote_peak_rps }} loadtest/quote.js | tee results/quote.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-results
+          path: results/

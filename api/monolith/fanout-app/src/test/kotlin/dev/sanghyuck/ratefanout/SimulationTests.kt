@@ -1,6 +1,7 @@
 package dev.sanghyuck.ratefanout
 
 import dev.sanghyuck.ratefanout.coupon.application.dto.CouponRunResponseDto
+import dev.sanghyuck.ratefanout.coupon.application.dto.CouponStatsDto
 import dev.sanghyuck.ratefanout.order.application.dto.OrderRunResponseDto
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
@@ -65,5 +66,17 @@ class SimulationTests {
   fun `레디스가 없는 서버에서 REDIS 모드는 503`() {
     WebTestClient.bindToServer().baseUrl("http://localhost:$port").build()
       .post().uri("/api/coupons/run?mode=REDIS").exchange().expectStatus().isEqualTo(503)
+  }
+
+  @Test
+  fun `쿠폰을 열고 한 건씩 발급하면 수량과 중복이 지켜진다`() {
+    val couponId = post<Map<String, String>>("/api/coupons?quantity=2")["couponId"]
+    val statuses = listOf(1, 1, 2, 3).map { post<Map<String, String>>("/api/coupons/$couponId/issue?userId=$it&mode=PESSIMISTIC")["status"] }
+    assertEquals(listOf("ISSUED", "DUPLICATE", "ISSUED", "SOLD_OUT"), statuses)
+
+    val stats = WebTestClient.bindToServer().baseUrl("http://localhost:$port").build()
+      .get().uri("/api/coupons/$couponId").exchange().expectStatus().isOk
+      .expectBody<CouponStatsDto>().returnResult().responseBody!!
+    assertEquals(CouponStatsDto(issued = 2, remaining = 0), stats)
   }
 }

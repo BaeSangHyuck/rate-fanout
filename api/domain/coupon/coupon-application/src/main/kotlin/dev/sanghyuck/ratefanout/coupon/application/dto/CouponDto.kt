@@ -22,3 +22,8 @@ data class CouponRunResponseDto(
   val p95Ms: Long,
   val maxMs: Long,
 )
+
+data class CouponStatsDto(
+  val issued: Int,
+  val remaining: Int,
+)
