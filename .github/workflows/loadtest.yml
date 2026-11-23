@@ -60,13 +60,17 @@ jobs:
       - name: coupon issue
         run: |
           for mode in PESSIMISTIC CONDITIONAL REDIS; do
-            echo "=== $mode $(date +%s)" >> results/metrics.txt
+            echo "$mode $(date +%s)" >> results/phases.txt
             k6 run --quiet -e BASE=http://localhost:8080 -e MODE=$mode -e PEAK_RPS=${{ inputs.coupon_peak_rps }} loadtest/coupon-issue.js | tee results/coupon-$mode.txt
           done
       - name: quote fan-out
         run: |
-          echo "=== QUOTE $(date +%s)" >> results/metrics.txt
-          k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=${{ inputs.quote_peak_rps }} loadtest/quote.js | tee results/quote.txt
+          # 저부하 기준선: 부하와 상관없이 원래 나는 타임아웃 비율(느린 기관 10%)을 먼저 잰다
+          echo "QUOTE_BASELINE $(date +%s)" >> results/phases.txt
+          k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=4 -e TAG=baseline loadtest/quote.js | tee results/quote-baseline.txt
+          echo "QUOTE_PEAK $(date +%s)" >> results/phases.txt
+          k6 run --quiet -e BASE=http://localhost:8080 -e PEAK_RPS=${{ inputs.quote_peak_rps }} -e TAG=peak loadtest/quote.js | tee results/quote-peak.txt
+          echo "END $(date +%s)" >> results/phases.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
